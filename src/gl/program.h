@@ -206,6 +206,7 @@ typedef struct {
 
 typedef struct {
     GLuint          id;     // internal id of the shader
+    int             deleted;// flagged for deletion while current
     int             linked;
     int             validated;
     GLenum          valid_result;

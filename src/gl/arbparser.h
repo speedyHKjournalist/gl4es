@@ -8,6 +8,7 @@
 struct sSpecialCases {
 	int hasFogFragCoord;
 	int isDepthReplacing;
+	int hasPointSize;
 };
 
 eToken readNextToken(sCurStatus* curStatus);

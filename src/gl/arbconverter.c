@@ -10,10 +10,150 @@
 #define FAIL(str) curStatus.status = ST_ERROR; if (*error_msg) free(*error_msg); \
 		*error_msg = strdup(str); continue
 #define curStatusPtr &curStatus
-char* gl4es_convertARB(const char* const code, int vertex, char **error_msg, int *error_ptr) {
+static int variableIndex(const sCurStatus *status, const sVariable *var) {
+	for (size_t i = 0; i < status->variables.size; ++i) {
+		if (status->variables.vars[i] == var)
+			return (int)i;
+	}
+	return -1;
+}
+
+static int variableIsDestination(const sCurStatus *status, const sVariable *var) {
+	for (size_t i = 0; i < status->instructions.size; ++i) {
+		const sInstruction *inst = status->instructions.insts[i];
+		if (inst->type != INST_KIL && inst->vars[0].var == var)
+			return 1;
+	}
+	return 0;
+}
+
+static int implicitAttribute(const sVariable *var, int vertex) {
+	if (!var->init.strings_count)
+		return 0;
+	const char *value = var->init.strings[0];
+	if (vertex)
+		return !strcmp(value, "gl_Vertex") || !strcmp(value, "gl_Normal") ||
+		       !strcmp(value, "gl_Color") || !strcmp(value, "gl_SecondaryColor") ||
+		       !strcmp(value, "gl_FogCoord") || !strncmp(value, "gl_MultiTexCoord", 16) ||
+		       !strncmp(value, "gl_VertexAttrib_", 16);
+	return !strcmp(value, "gl_Color") || !strcmp(value, "gl_SecondaryColor") ||
+	       !strncmp(value, "gl_TexCoord[", 12) || !strcmp(value, "gl_FragCoord") ||
+	       !strncmp(value, "vec4(gl_FogFragCoord", 20);
+}
+
+static int earlierImplicitBinding(const sCurStatus *status, size_t current,
+	const sVariable *var, int vertex, int attribute) {
+	if (!var->init.strings_count)
+		return 0;
+	for (size_t i = 0; i < current; ++i) {
+		const sVariable *other = status->variables.vars[i];
+		if (other->type != VARTYPE_CONST || !other->init.strings_count ||
+		    variableIsDestination(status, other) ||
+		    implicitAttribute(other, vertex) != attribute)
+			continue;
+		if (!strcmp(other->init.strings[0], var->init.strings[0]))
+			return 1;
+	}
+	return 0;
+}
+
+static void collectProgramStats(const sCurStatus *status, int vertex,
+	arb_program_stats_t *stats) {
+	memset(stats, 0, sizeof(*stats));
+	stats->instructions = (int)status->instructions.size;
+	stats->tex_indirections = vertex ? 0 : 1;
+
+	for (size_t i = 0; i < status->variables.size; ++i) {
+		const sVariable *var = status->variables.vars[i];
+		switch (var->type) {
+		case VARTYPE_TEMP:
+			++stats->temporaries;
+			break;
+		case VARTYPE_PARAM:
+			++stats->parameters;
+			break;
+		case VARTYPE_PARAM_MULT:
+			stats->parameters += var->size > 0 ? var->size : (int)var->init.strings_count;
+			break;
+		case VARTYPE_ATTRIB:
+			++stats->attributes;
+			break;
+		case VARTYPE_ADDRESS:
+			++stats->address_registers;
+			break;
+		default:
+			break;
+		}
+	}
+	for (size_t i = 0; i < status->variables.size; ++i) {
+		const sVariable *var = status->variables.vars[i];
+		if (var->type != VARTYPE_CONST || variableIsDestination(status, var))
+			continue;
+		int attribute = implicitAttribute(var, vertex);
+		if (earlierImplicitBinding(status, i, var, vertex, attribute))
+			continue;
+		if (attribute)
+			++stats->attributes;
+		else
+			++stats->parameters;
+	}
+
+	/* ARB_fragment_program issue 24 defines texture indirections as nodes
+	 * separated when a texture instruction conflicts with temporaries used in
+	 * the current node.  Track those sets by parsed temporary identity. */
+	unsigned char *tex_outputs = calloc(status->variables.size, 1);
+	unsigned char *alu_temps = calloc(status->variables.size, 1);
+	if (status->variables.size && (!tex_outputs || !alu_temps)) {
+		free(tex_outputs);
+		free(alu_temps);
+		return;
+	}
+	for (size_t i = 0; i < status->instructions.size; ++i) {
+		const sInstruction *inst = status->instructions.insts[i];
+		if (INSTTEX(inst->type)) {
+			++stats->tex_instructions;
+			int input = variableIndex(status, inst->vars[1].var);
+			int output = variableIndex(status, inst->vars[0].var);
+			int split = input >= 0 && inst->vars[1].var->type == VARTYPE_TEMP && tex_outputs[input];
+			split |= output >= 0 && inst->vars[0].var->type == VARTYPE_TEMP && alu_temps[output];
+			if (!vertex && split) {
+				++stats->tex_indirections;
+				memset(tex_outputs, 0, status->variables.size);
+				memset(alu_temps, 0, status->variables.size);
+			}
+			if (output >= 0 && inst->vars[0].var->type == VARTYPE_TEMP)
+				tex_outputs[output] = 1;
+		} else {
+			++stats->alu_instructions;
+			if (inst->type == INST_KIL) {
+				int input = variableIndex(status, inst->vars[0].var);
+				if (input >= 0 && inst->vars[0].var->type == VARTYPE_TEMP)
+					alu_temps[input] = 1;
+				continue;
+			}
+			for (int operand = 1; operand < MAX_OPERANDS && inst->vars[operand].var; ++operand) {
+				int input = variableIndex(status, inst->vars[operand].var);
+				if (input >= 0 && inst->vars[operand].var->type == VARTYPE_TEMP)
+					alu_temps[input] = 1;
+			}
+			int output = variableIndex(status, inst->vars[0].var);
+			if (output >= 0 && inst->vars[0].var->type == VARTYPE_TEMP) {
+				alu_temps[output] = 1;
+				tex_outputs[output] = 1;
+			}
+		}
+	}
+	free(tex_outputs);
+	free(alu_temps);
+}
+
+char* gl4es_convertARBWithStats(const char* const code, int vertex, char **error_msg,
+	int *error_ptr, arb_program_stats_t *stats) {
 	*error_ptr = -1; // Reinit error pointer
+	if (stats)
+		memset(stats, 0, sizeof(*stats));
 	
-	struct sSpecialCases specialCases = {0, 0};
+	struct sSpecialCases specialCases = {0};
 	const char *codeStart = code;
 	// Not sure this is really OK...
 	if ((codeStart[0] != '!') || (codeStart[1] != '!')) {
@@ -178,6 +318,9 @@ char* gl4es_convertARB(const char* const code, int vertex, char **error_msg, int
 			if (specialCases.hasFogFragCoord) {
 				APPEND_OUTPUT("\tvec4 gl4es_FogFragCoordTemp = vec4(gl_FogFragCoord);\n", 54)
 			}
+			if (specialCases.hasPointSize) {
+				APPEND_OUTPUT2("\tvec4 gl4es_PointSizeTemp = vec4(gl_PointSize, 0., 0., 0.);\n")
+			}
 		} else {
 			// No address
 			APPEND_OUTPUT("#version 120\n\nvoid main() {\n", 28)
@@ -252,6 +395,9 @@ char* gl4es_convertARB(const char* const code, int vertex, char **error_msg, int
 		
 		if (specialCases.hasFogFragCoord) {
 			APPEND_OUTPUT("\tgl_FogFragCoord = gl4es_FogFragCoordTemp.x;\n", 45)
+		}
+		if (specialCases.hasPointSize) {
+			APPEND_OUTPUT2("\tgl_PointSize = gl4es_PointSizeTemp.x;\n")
 		}
 		if (specialCases.isDepthReplacing) {
 			APPEND_OUTPUT("\tgl_FragDepth = gl4es_FragDepthTemp.z;\n", 39)
@@ -346,7 +492,13 @@ char* gl4es_convertARB(const char* const code, int vertex, char **error_msg, int
 	}
 	
 	ARBCONV_DBG(printf("Success!\n\nOutput:\n%s", curStatus.outputString);)
+	if (stats)
+		collectProgramStats(&curStatus, vertex, stats);
 	
 	freeStatus(&curStatus);
 	return curStatus.outputString;
+}
+
+char* gl4es_convertARB(const char* const code, int vertex, char **error_msg, int *error_ptr) {
+	return gl4es_convertARBWithStats(code, vertex, error_msg, error_ptr, NULL);
 }

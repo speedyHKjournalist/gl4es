@@ -31,6 +31,13 @@ void APIENTRY_GL4ES gl4es_glAttachShader(GLuint program, GLuint shader) {
     CHECK_PROGRAM(void, program)
     CHECK_SHADER(void, shader)
 
+    for (int i = 0; i < glprogram->attach_size; i++) {
+        if (glprogram->attach[i] == shader) {
+            errorShim(GL_INVALID_OPERATION);
+            return;
+        }
+    }
+
     // add shader reference to program
     if(glprogram->attach_cap == glprogram->attach_size) {
         glprogram->attach_cap += 4;
@@ -168,24 +175,37 @@ void deleteProgram(program_t *glprogram, khint_t k_program) {
     free(glprogram);
 }
 
+static void actually_deleteprogram(program_t *glprogram, khint_t k_program) {
+    LOAD_GLES2(glDeleteProgram);
+    if (gles_glDeleteProgram) {
+        gles_glDeleteProgram(glprogram->id);
+        errorGL();
+    } else {
+        noerrorShim();
+    }
+
+    for (int i = 0; i < glprogram->attach_size; i++) {
+        actually_detachshader(glprogram->attach[i]);
+    }
+    deleteProgram(glprogram, k_program);
+}
+
 void APIENTRY_GL4ES gl4es_glDeleteProgram(GLuint program) {
     DBG(printf("glDeleteProgram(%d)\n", program);)
     if(!glstate) return;    // in case a program delete shaders after deleteing all context
     FLUSH_BEGINEND;
     CHECK_PROGRAM(void, program)
-    // send to hardware
-    LOAD_GLES2(glDeleteProgram);
-    if(gles_glDeleteProgram) {
-        gles_glDeleteProgram(glprogram->id);
-        errorGL();
-    } else
+    if (glprogram->deleted) {
         noerrorShim();
-    // TODO: check GL ERROR to not clean in case of error?
-    // clean attached shaders
-    for (int i=0; i<glprogram->attach_size; i++) {
-        actually_detachshader(glprogram->attach[i]); // auto delete if marked as delete!
+        return;
     }
-    deleteProgram(glprogram, k_program);
+    glprogram->deleted = 1;
+    noerrorShim();
+
+    /* OpenGL keeps a current program alive until another program is used. */
+    if (glstate->glsl->program != program) {
+        actually_deleteprogram(glprogram, k_program);
+    }
 }
 
 void APIENTRY_GL4ES gl4es_glDetachShader(GLuint program, GLuint shader) {
@@ -197,9 +217,8 @@ void APIENTRY_GL4ES gl4es_glDetachShader(GLuint program, GLuint shader) {
     int f = 0;
     while(f<glprogram->attach_size && glprogram->attach[f]!=shader)
         f++;
-    // if program is linked, don't try anything....
-    if(glprogram->linked) {
-        noerrorShim();
+    if (f == glprogram->attach_size) {
+        errorShim(GL_INVALID_OPERATION);
         return;
     }
     // send to hardware
@@ -209,7 +228,20 @@ void APIENTRY_GL4ES gl4es_glDetachShader(GLuint program, GLuint shader) {
         errorGL();
     } else
         noerrorShim();
-    // marked as detached
+    memmove(&glprogram->attach[f], &glprogram->attach[f + 1],
+            (size_t)(glprogram->attach_size - f - 1) * sizeof(GLuint));
+    glprogram->attach_size--;
+
+    glprogram->last_vert = NULL;
+    glprogram->last_frag = NULL;
+    for (int i = 0; i < glprogram->attach_size; i++) {
+        shader_t *attached = getShader(glprogram->attach[i]);
+        if (!attached) continue;
+        if (attached->type == GL_VERTEX_SHADER && !glprogram->last_vert)
+            glprogram->last_vert = attached;
+        else if (attached->type == GL_FRAGMENT_SHADER && !glprogram->last_frag)
+            glprogram->last_frag = attached;
+    }
     actually_detachshader(shader);
 }
 
@@ -375,11 +407,7 @@ void APIENTRY_GL4ES gl4es_glGetProgramiv(GLuint program, GLenum pname, GLint *pa
     noerrorShim();
     switch(pname) {
         case GL_DELETE_STATUS:
-            if(gles_glGetProgramiv) {
-                gles_glGetProgramiv(glprogram->id, pname, params);
-                errorGL();
-            } else
-                *params = GL_FALSE;
+            *params = glprogram->deleted ? GL_TRUE : GL_FALSE;
             break;
         case GL_LINK_STATUS:
             *params = glprogram->linked?GL_TRUE:GL_FALSE;
@@ -586,6 +614,11 @@ static void fill_program(program_t *glprogram)
                         glprogram->texunits[tu_idx].type=TU_TEX2D;
                         glprogram->texunits[tu_idx].req_tu = glprogram->texunits[tu_idx].act_tu = 0;
                         ++tu_idx;
+                    } else if (type==GL_SAMPLER_3D) {
+                        glprogram->texunits[tu_idx].id = id;
+                        glprogram->texunits[tu_idx].type=TU_TEX3D;
+                        glprogram->texunits[tu_idx].req_tu = glprogram->texunits[tu_idx].act_tu = 0;
+                        ++tu_idx;
                     }
                     DBG(printf(" uniform #%d : \"%s\"%s type=%s size=%d\n", id, gluniform->name, gluniform->builtin?" (builtin) ":"", PrintEnum(gluniform->type), gluniform->size);)
                     if(gluniform->size==1) ++glprogram->num_uniform;
@@ -608,7 +641,7 @@ static void fill_program(program_t *glprogram)
         uniform_t *m;
         khint_t k;
         kh_foreach(glprogram->uniform, k, m,
-            if(m->type == GL_SAMPLER_2D || m->type == GL_SAMPLER_CUBE)
+            if(m->type == GL_SAMPLER_2D || m->type == GL_SAMPLER_3D || m->type == GL_SAMPLER_CUBE)
                 memset((char*)glprogram->cache.cache+m->cache_offs, 0xff, m->cache_size);
         )
     }
@@ -733,8 +766,6 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
     CHECK_PROGRAM(void, program)
     noerrorShim();
 
-    clear_program(glprogram);
-
     // check if attached shaders are compatible in term of varying...
     shaderconv_need_t needs = {0};
     needs.need_texcoord = -1;
@@ -792,6 +823,7 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
         gles_glGetProgramiv(glprogram->id, GL_LINK_STATUS, &glprogram->linked);
         DBG(printf(" link status = %d\n", glprogram->linked);)
         if(glprogram->linked) {
+            clear_program(glprogram);
             fill_program(glprogram);
             noerrorShimNoPurge();
         } else {
@@ -811,17 +843,39 @@ void APIENTRY_GL4ES gl4es_glLinkProgram(GLuint program) {
 void APIENTRY_GL4ES gl4es_glUseProgram(GLuint program) {
     DBG(printf("glUseProgram(%d) old=%d\n", program, glstate->glsl->program);)
     PUSH_IF_COMPILING(glUseProgram);
+    GLuint previous = glstate->glsl->program;
     if(program==0) {
         glstate->glsl->program=0;
         glstate->glsl->glprogram=NULL;
+        noerrorShim();
+        if (previous) {
+            khash_t(programlist) *programs = glstate->glsl->programs;
+            khint_t k = kh_get(programlist, programs, previous);
+            if (k != kh_end(programs)) {
+                program_t *old = kh_value(programs, k);
+                if (old->deleted) actually_deleteprogram(old, k);
+            }
+        }
         return;
     }
     CHECK_PROGRAM(void, program)
+    if (!glprogram->linked) {
+        errorShim(GL_INVALID_OPERATION);
+        return;
+    }
     noerrorShim();
     DBG(printf("program id=%d\n", glprogram->id);)
 
     glstate->glsl->program=glprogram->id;
     glstate->glsl->glprogram=glprogram;
+    if (previous && previous != program) {
+        khash_t(programlist) *programs = glstate->glsl->programs;
+        khint_t k = kh_get(programlist, programs, previous);
+        if (k != kh_end(programs)) {
+            program_t *old = kh_value(programs, k);
+            if (old->deleted) actually_deleteprogram(old, k);
+        }
+    }
 }
 
 void APIENTRY_GL4ES gl4es_glValidateProgram(GLuint program) {

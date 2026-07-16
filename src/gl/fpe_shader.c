@@ -611,10 +611,13 @@ const char* const* fpe_VertexShader(shaderconv_need_t* need, fpe_state_t *state)
         ShadAppend("vec4 tmp_tex;\n");
     for (int i=0; i<hardext.maxtex; i++) {
         int t = state->texture[i].textype;
-        if(need && (need->need_texs&(1<<i)) && t==0)
-            t = 1;
-        if(need && !(need->need_texs&(1<<i)))
-            t = 0;
+        /* A generated vertex shader paired with a user fragment shader must
+         * preserve the complete legacy gl_TexCoord[] value.  The fragment
+         * converter exposes it as a vec4 independently of the currently
+         * enabled texture target; narrowing a 3D unit here to .st both loses
+         * the r coordinate and makes the generated varying types disagree. */
+        if(need)
+            t = (need->need_texs & (1 << i)) ? FPE_TEX_2D : 0;
         int mat = state->texture[i].texmat;
         int adjust = state->texture[i].texadjust;
         int tg[4];

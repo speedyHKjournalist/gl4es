@@ -222,7 +222,7 @@ KHASH_MAP_DECLARE_STR(variables, sVariable*)
 #define kh_truly_exist(h, i) ((i < kh_end(h)) && kh_exist(h, i))
 #define kh_str_exist(h, s) kh_truly_exist(h, kh_get(variables, h, s))
 
-#define MAX_OPERANDS 4
+#define MAX_OPERANDS 6
 typedef struct _sInstruction {
 	eInstruction type;
 	int saturated;
@@ -235,6 +235,10 @@ typedef struct _sInstruction {
 		enum {
 			SWIZ_NONE = 0, SWIZ_X, SWIZ_Y, SWIZ_Z, SWIZ_W
 		} swizzle[4];
+		enum {
+			SWZSEL_NONE = 0, SWZSEL_X, SWZSEL_Y, SWZSEL_Z,
+			SWZSEL_W, SWZSEL_ZERO, SWZSEL_ONE
+		} swzSelector;
 	} vars[MAX_OPERANDS];
 	
 	const char *codeLocation;
@@ -303,6 +307,7 @@ typedef struct _sCurStatus {
 	
 	khash_t(variables) *varsMap;
 	sVariables         variables;
+	size_t             nextGeneratedName;
 	sInstructions      instructions;
 	enum { FOG_NONE, FOG_EXP, FOG_EXP2, FOG_LINEAR } fogType;
 	int			position_invariant;

@@ -19,6 +19,31 @@
 #define DBG(a)
 #endif
 
+#define ARB_MAX_INSTRUCTIONS       4096
+#define ARB_MAX_TEMPORARIES          64
+#define ARB_MAX_ADDRESS_REGISTERS      4
+#define ARB_MAX_ALU_INSTRUCTIONS    1024
+#define ARB_MAX_TEX_INSTRUCTIONS      32
+#define ARB_MAX_TEX_INDIRECTIONS       8
+
+static int arbMaxParameters(GLenum target) {
+    return target == GL_VERTEX_PROGRAM_ARB ? MAX_VTX_PROG_ENV_PARAMS : MAX_FRG_PROG_ENV_PARAMS;
+}
+
+static GLboolean arbProgramUnderLimits(const oldprogram_t *old, GLenum target) {
+    const arb_program_stats_t *stats = &old->stats;
+    if(stats->instructions > ARB_MAX_INSTRUCTIONS ||
+       stats->temporaries > ARB_MAX_TEMPORARIES ||
+       stats->parameters > arbMaxParameters(target) ||
+       stats->attributes > hardext.maxvattrib)
+        return GL_FALSE;
+    if(target == GL_VERTEX_PROGRAM_ARB)
+        return stats->address_registers <= ARB_MAX_ADDRESS_REGISTERS;
+    return stats->alu_instructions <= ARB_MAX_ALU_INSTRUCTIONS &&
+           stats->tex_instructions <= ARB_MAX_TEX_INSTRUCTIONS &&
+           stats->tex_indirections <= ARB_MAX_TEX_INDIRECTIONS;
+}
+
 // Implement "Old program" handling: so ARB_vertex_program and ARB_fragment_program extensions
 // the core of this is a conversion between ARB ASM-like syntax to GLSL, then using regular functions
 // Note that a program in this context is in fact a shader in ARB_vertex_shader (and GLSL) extension
@@ -141,18 +166,35 @@ void APIENTRY_GL4ES gl4es_glProgramStringARB(GLenum target, GLenum format, GLsiz
             vertex = 0;
             break;
         default:
-            errorShim(GL_INVALID_VALUE);
+            errorShim(GL_INVALID_ENUM);
             return;
     }
     if(format!=GL_PROGRAM_FORMAT_ASCII_ARB) {
         errorShim(GL_INVALID_ENUM);
         return;
     }
+    if(len < 0) {
+        errorShim(GL_INVALID_VALUE);
+        return;
+    }
+    if(!old || (!string && len)) {
+        errorShim(GL_INVALID_OPERATION);
+        return;
+    }
     if(old->string)
         free(old->string);
     // grab the new program
     old->string = calloc(1, len + 1);
-    memcpy(old->string, string, len);
+    if(!old->string) {
+        old->string_length = 0;
+        errorShim(GL_OUT_OF_MEMORY);
+        return;
+    }
+    if(len)
+        memcpy(old->string, string, len);
+    old->string_length = len;
+    memset(&old->stats, 0, sizeof(old->stats));
+    old->under_native_limits = GL_FALSE;
     // check if a shader is actually attached
     if(!old->shader) {
         DBG(printf("Error, no shader attached but glProgramStringARB(...) called\n");)
@@ -161,13 +203,16 @@ void APIENTRY_GL4ES gl4es_glProgramStringARB(GLenum target, GLenum format, GLsiz
     }
     // Convert to GLSL
     const GLchar * p[1] = {0};
-    p[0] = gl4es_convertARB(old->string, vertex, &glstate->glsl->error_msg, &glstate->glsl->error_ptr);
+    arb_program_stats_t stats;
+    p[0] = gl4es_convertARBWithStats(old->string, vertex, &glstate->glsl->error_msg,
+                                     &glstate->glsl->error_ptr, &stats);
     if((!p[0]) || (glstate->glsl->error_ptr!=-1)) {
         DBG(printf("Error with ARB->GLSL conversion\nsource is:\n%s\n======\n", old->shader->source);)
         errorShim(GL_INVALID_OPERATION);
         return;
     }
     gl4es_glShaderSource(old->shader->id, 1, p , NULL);
+    free((void*)p[0]);
     DBG(printf("converted source is:\n%s\n======\n", old->shader->source?old->shader->source:"**error**");)
     if (!old->shader->source) {
         DBG(printf("Error with ARB->GLSL conversion\n");)
@@ -196,6 +241,9 @@ void APIENTRY_GL4ES gl4es_glProgramStringARB(GLenum target, GLenum format, GLsiz
         glstate->glsl->error_ptr = 0;
         return;
     }
+    old->stats = stats;
+    old->under_native_limits = arbProgramUnderLimits(old, target);
+    noerrorShimNoPurge();
 }
 
 void APIENTRY_GL4ES gl4es_glBindProgramARB(GLenum target, GLuint program) {
@@ -203,6 +251,10 @@ void APIENTRY_GL4ES gl4es_glBindProgramARB(GLenum target, GLuint program) {
     khint_t k;
     oldprogram_t* old = NULL; 
     kh_oldprograms_t * oldprograms = glstate->glsl->oldprograms;
+    if (target != GL_VERTEX_PROGRAM_ARB && target != GL_FRAGMENT_PROGRAM_ARB) {
+        errorShim(GL_INVALID_ENUM);
+        return;
+    }
     if(program) {
         k = kh_get(oldprograms, oldprograms, program);
         if(k == kh_end(oldprograms)) {
@@ -291,21 +343,46 @@ void APIENTRY_GL4ES gl4es_glBindProgramARB(GLenum target, GLuint program) {
 
 void APIENTRY_GL4ES gl4es_glDeleteProgramsARB(GLsizei n, const GLuint *programs) {
     DBG(printf("glDeleteProgramsARB(%d, %p)\n", n, programs);)
-    //TODO, unbind if binded?
+    if (n < 0) {
+        errorShim(GL_INVALID_VALUE);
+        return;
+    }
+    if (n && !programs) {
+        errorShim(GL_INVALID_VALUE);
+        return;
+    }
     khint_t k;
     kh_oldprograms_t * oldprograms = glstate->glsl->oldprograms;
     for (int i=0; i<n; ++i) {
         GLuint id = programs[i];
         k = kh_get(oldprograms, oldprograms, id);
         if(k!=kh_end(oldprograms)) {
-            freeOldProgram(kh_value(oldprograms, k));
+            oldprogram_t *old = kh_value(oldprograms, k);
+            if (glstate->glsl->vtx_prog == old) {
+                glstate->glsl->vtx_prog = NULL;
+                if (glstate->fpe_state) glstate->fpe_state->vertex_prg_id = 0;
+            }
+            if (glstate->glsl->frg_prog == old) {
+                glstate->glsl->frg_prog = NULL;
+                if (glstate->fpe_state) glstate->fpe_state->fragment_prg_id = 0;
+            }
+            freeOldProgram(old);
             kh_del(oldprograms, oldprograms, k);
         }
     }
+    noerrorShimNoPurge();
 }
 
 void APIENTRY_GL4ES gl4es_glGenProgramsARB(GLsizei n, GLuint *programs) {
     DBG(printf("glGenProgramsARB(%d, %p)\n", n, programs);)
+    if (n < 0) {
+        errorShim(GL_INVALID_VALUE);
+        return;
+    }
+    if (n && !programs) {
+        errorShim(GL_INVALID_VALUE);
+        return;
+    }
     GLuint last = 0;
     khint_t k;
     kh_oldprograms_t * oldprograms = glstate->glsl->oldprograms;
@@ -650,14 +727,14 @@ void APIENTRY_GL4ES gl4es_glGetProgramivARB(GLenum target, GLenum pname, GLint *
             old = glstate->glsl->frg_prog;
             break;
         default:
-            errorShim(GL_INVALID_VALUE);
+            errorShim(GL_INVALID_ENUM);
             return;
     }
     switch(pname) {
         case GL_PROGRAM_LENGTH_ARB:
             if(old) {
                 noerrorShimNoPurge();
-                *params = old->string?(strlen(old->string)+1):0;
+                *params = old->string_length;
             } else
                 errorShim(GL_INVALID_OPERATION);
             break;
@@ -677,64 +754,124 @@ void APIENTRY_GL4ES gl4es_glGetProgramivARB(GLenum target, GLenum pname, GLint *
             break;
         case GL_MAX_PROGRAM_LOCAL_PARAMETERS_ARB:
             *params = (target==GL_VERTEX_PROGRAM_ARB)?MAX_VTX_PROG_LOC_PARAMS:MAX_FRG_PROG_LOC_PARAMS;
+            noerrorShimNoPurge();
             break;
         case GL_MAX_PROGRAM_ENV_PARAMETERS_ARB:
             *params = (target==GL_VERTEX_PROGRAM_ARB)?MAX_VTX_PROG_ENV_PARAMS:MAX_FRG_PROG_ENV_PARAMS;
+            noerrorShimNoPurge();
             break;
         case GL_MAX_PROGRAM_NATIVE_ATTRIBS_ARB:
         case GL_MAX_PROGRAM_ATTRIBS_ARB:
             *params = hardext.maxvattrib;
+            noerrorShimNoPurge();
             break;
-        // arbritrary settings...
         case GL_MAX_PROGRAM_NATIVE_INSTRUCTIONS_ARB:
         case GL_MAX_PROGRAM_INSTRUCTIONS_ARB:
-            *params = 4096;
+            *params = ARB_MAX_INSTRUCTIONS;
+            noerrorShimNoPurge();
             break;
         case GL_MAX_PROGRAM_NATIVE_TEMPORARIES_ARB:
         case GL_MAX_PROGRAM_TEMPORARIES_ARB:
-            *params = 64;
+            *params = ARB_MAX_TEMPORARIES;
+            noerrorShimNoPurge();
             break;
         case GL_MAX_PROGRAM_NATIVE_PARAMETERS_ARB:
         case GL_MAX_PROGRAM_PARAMETERS_ARB:
-            *params = 64;
+            *params = arbMaxParameters(target);
+            noerrorShimNoPurge();
             break;
         case GL_MAX_PROGRAM_NATIVE_ADDRESS_REGISTERS_ARB:
         case GL_MAX_PROGRAM_ADDRESS_REGISTERS_ARB:
-            *params = 4;
+            if(target != GL_VERTEX_PROGRAM_ARB) {
+                errorShim(GL_INVALID_ENUM);
+                break;
+            }
+            *params = ARB_MAX_ADDRESS_REGISTERS;
+            noerrorShimNoPurge();
             break;
         case GL_MAX_PROGRAM_NATIVE_ALU_INSTRUCTIONS_ARB:
         case GL_MAX_PROGRAM_ALU_INSTRUCTIONS_ARB:
-            *params = 1024;
+            if(target != GL_FRAGMENT_PROGRAM_ARB) {
+                errorShim(GL_INVALID_ENUM);
+                break;
+            }
+            *params = ARB_MAX_ALU_INSTRUCTIONS;
+            noerrorShimNoPurge();
             break;
         case GL_MAX_PROGRAM_NATIVE_TEX_INSTRUCTIONS_ARB:
         case GL_MAX_PROGRAM_TEX_INSTRUCTIONS_ARB:
-            *params = 32;
+            if(target != GL_FRAGMENT_PROGRAM_ARB) {
+                errorShim(GL_INVALID_ENUM);
+                break;
+            }
+            *params = ARB_MAX_TEX_INSTRUCTIONS;
+            noerrorShimNoPurge();
             break;
         case GL_MAX_PROGRAM_TEX_INDIRECTIONS_ARB:
         case GL_MAX_PROGRAM_NATIVE_TEX_INDIRECTIONS_ARB:
-            *params = 8;
+            if(target != GL_FRAGMENT_PROGRAM_ARB) {
+                errorShim(GL_INVALID_ENUM);
+                break;
+            }
+            *params = ARB_MAX_TEX_INDIRECTIONS;
+            noerrorShimNoPurge();
             break;
-        /*
-        // bounded program stats...
         case GL_PROGRAM_NATIVE_INSTRUCTIONS_ARB:
         case GL_PROGRAM_INSTRUCTIONS_ARB:
+            if(!old) { errorShim(GL_INVALID_OPERATION); break; }
+            *params = old->stats.instructions;
+            noerrorShimNoPurge();
+            break;
         case GL_PROGRAM_NATIVE_TEMPORARIES_ARB:
         case GL_PROGRAM_TEMPORARIES_ARB:
+            if(!old) { errorShim(GL_INVALID_OPERATION); break; }
+            *params = old->stats.temporaries;
+            noerrorShimNoPurge();
+            break;
         case GL_PROGRAM_NATIVE_PARAMETERS_ARB:
         case GL_PROGRAM_PARAMETERS_ARB:
+            if(!old) { errorShim(GL_INVALID_OPERATION); break; }
+            *params = old->stats.parameters;
+            noerrorShimNoPurge();
+            break;
         case GL_PROGRAM_NATIVE_ATTRIBS_ARB:
         case GL_PROGRAM_ATTRIBS_ARB:
+            if(!old) { errorShim(GL_INVALID_OPERATION); break; }
+            *params = old->stats.attributes;
+            noerrorShimNoPurge();
+            break;
         case GL_PROGRAM_NATIVE_ADDRESS_REGISTERS_ARB:
         case GL_PROGRAM_ADDRESS_REGISTERS_ARB:
+            if(target != GL_VERTEX_PROGRAM_ARB) { errorShim(GL_INVALID_ENUM); break; }
+            if(!old) { errorShim(GL_INVALID_OPERATION); break; }
+            *params = old->stats.address_registers;
+            noerrorShimNoPurge();
+            break;
         case GL_PROGRAM_NATIVE_ALU_INSTRUCTIONS_ARB:
         case GL_PROGRAM_ALU_INSTRUCTIONS_ARB:
+            if(target != GL_FRAGMENT_PROGRAM_ARB) { errorShim(GL_INVALID_ENUM); break; }
+            if(!old) { errorShim(GL_INVALID_OPERATION); break; }
+            *params = old->stats.alu_instructions;
+            noerrorShimNoPurge();
+            break;
         case GL_PROGRAM_NATIVE_TEX_INSTRUCTIONS_ARB:
         case GL_PROGRAM_TEX_INSTRUCTIONS_ARB:
+            if(target != GL_FRAGMENT_PROGRAM_ARB) { errorShim(GL_INVALID_ENUM); break; }
+            if(!old) { errorShim(GL_INVALID_OPERATION); break; }
+            *params = old->stats.tex_instructions;
+            noerrorShimNoPurge();
+            break;
         case GL_PROGRAM_NATIVE_TEX_INDIRECTIONS_ARB:
         case GL_PROGRAM_TEX_INDIRECTIONS_ARB:
-        */
+            if(target != GL_FRAGMENT_PROGRAM_ARB) { errorShim(GL_INVALID_ENUM); break; }
+            if(!old) { errorShim(GL_INVALID_OPERATION); break; }
+            *params = old->stats.tex_indirections;
+            noerrorShimNoPurge();
+            break;
         case GL_PROGRAM_UNDER_NATIVE_LIMITS_ARB:
-            *params = 1;    // always return OK for now
+            if(!old) { errorShim(GL_INVALID_OPERATION); break; }
+            *params = old->under_native_limits;
+            noerrorShimNoPurge();
             break;
         default:
             errorShim(GL_INVALID_ENUM);
@@ -752,7 +889,7 @@ void APIENTRY_GL4ES gl4es_glGetProgramStringARB(GLenum target, GLenum pname, GLv
             old = glstate->glsl->frg_prog;
             break;
         default:
-            errorShim(GL_INVALID_VALUE);
+            errorShim(GL_INVALID_ENUM);
             return;
     }
     if(pname!=GL_PROGRAM_STRING_ARB) {
@@ -763,8 +900,8 @@ void APIENTRY_GL4ES gl4es_glGetProgramStringARB(GLenum target, GLenum pname, GLv
         errorShim(GL_INVALID_OPERATION);
         return;
     }
-    if(old->string)
-        strcpy(string, old->string);
+    if(old->string_length)
+        memcpy(string, old->string, old->string_length);
     noerrorShimNoPurge();
 }
 

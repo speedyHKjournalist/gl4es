@@ -23,6 +23,45 @@
 #define IS_NEW_STR_OR_SWIZZLE(str, t) (((str)[0] == ',') || ((t == 1) && IS_SWIZZLE(str)))
 #define IS_NONE_OR_SWIZZLE (!newVar->strLen || IS_SWIZZLE(newVar->strParts[0]))
 
+static char **resolvedParam(const char *value) {
+	char **result = (char**)calloc(2, sizeof(char*));
+	if (!result)
+		return NULL;
+	result[0] = strdup(value);
+	if (!result[0]) {
+		free(result);
+		return NULL;
+	}
+	return result;
+}
+
+static char *popBracketedIndex(sCurStatus_NewVar *newVar, int limit) {
+	if (newVar->strLen < 3 || newVar->strParts[0][0] != '[')
+		return NULL;
+	free(popFIFO((sArray*)newVar));
+	char *index = popFIFO((sArray*)newVar);
+	if (!index || !*index) {
+		free(index);
+		return NULL;
+	}
+	int value = 0;
+	for (const char *p = index; *p; ++p) {
+		if (*p < '0' || *p > '9') {
+			free(index);
+			return NULL;
+		}
+		value = value * 10 + *p - '0';
+	}
+	char *close = popFIFO((sArray*)newVar);
+	if (!close || close[0] != ']' || close[1] != '\0' || value >= limit) {
+		free(close);
+		free(index);
+		return NULL;
+	}
+	free(close);
+	return index;
+}
+
 ptrdiff_t getTokenLength(const sCurStatus* curStatus) {
 	return curStatus->endOfToken - curStatus->codePtr;
 }
@@ -567,10 +606,11 @@ int resolveOutput(sCurStatus_NewVar *newVar, int vertex, struct sSpecialCases *s
 			pushArray((sArray*)&newVar->var->init, strdup("gl4es_FogFragCoordTemp"));
 			newVar->var->init.strings_total_len = 22;
 		} else if (!strcmp(tok, "pointsize")) {
-			// result.pointsize => gl_Point.size
+			// result.pointsize => gl_PointSize
 			free(tok);
-			pushArray((sArray*)&newVar->var->init, strdup("vec4(gl_Point.size, 0., 0., 0.)"));
-			newVar->var->init.strings_total_len = 31;
+			specialCases->hasPointSize = 1;
+			pushArray((sArray*)&newVar->var->init, strdup("gl4es_PointSizeTemp"));
+			newVar->var->init.strings_total_len = 19;
 		} else if (!strcmp(tok, "texcoord")) {
 			free(tok);
 			if (!IS_NONE_OR_SWIZZLE) {
@@ -953,7 +993,120 @@ char **resolveParam(sCurStatus_NewVar *newVar, int vertex, int type) {
 				ARBCONV_DBG_RE("Failed to get param: state.lightprod(not [)\n")
 				return NULL;
 			}
-		} else if (!strcmp(tok, "matrix")) {
+			} else if (!strcmp(tok, "texgen")) {
+				if (!vertex) {
+					free(tok);
+					return NULL;
+				}
+				free(tok);
+				char *unit = NULL;
+				if (newVar->strLen && newVar->strParts[0][0] == '[') {
+					unit = popBracketedIndex(newVar, MAX_TEX);
+					if (!unit)
+						return NULL;
+				} else {
+					unit = strdup("0");
+				}
+				char *space = popFIFO((sArray*)newVar);
+				char *coord = popFIFO((sArray*)newVar);
+				if (!space || !coord || (strcmp(space, "eye") && strcmp(space, "object")) ||
+				    (strcmp(coord, "s") && strcmp(coord, "t") && strcmp(coord, "r") && strcmp(coord, "q"))) {
+					free(unit); free(space); free(coord);
+					return NULL;
+				}
+				char value[64];
+				snprintf(value, sizeof(value), "gl_%sPlane%c[%s]",
+				         !strcmp(space, "eye") ? "Eye" : "Object",
+				         coord[0] - 'a' + 'A', unit);
+				free(unit); free(space); free(coord);
+				return resolvedParam(value);
+			} else if (!strcmp(tok, "fog")) {
+				free(tok);
+				tok = popFIFO((sArray*)newVar);
+				if (!tok)
+					return NULL;
+				if (!strcmp(tok, "color")) {
+					free(tok);
+					return resolvedParam("gl_Fog.color");
+				}
+				if (!strcmp(tok, "params")) {
+					free(tok);
+					return resolvedParam("vec4(gl_Fog.density, gl_Fog.start, gl_Fog.end, gl_Fog.scale)");
+				}
+				free(tok);
+				return NULL;
+			} else if (!strcmp(tok, "clip")) {
+				if (!vertex) {
+					free(tok);
+					return NULL;
+				}
+				free(tok);
+				char *plane = popBracketedIndex(newVar, MAX_CLIP_PLANES);
+				tok = popFIFO((sArray*)newVar);
+				if (!plane || !tok || strcmp(tok, "plane")) {
+					free(plane); free(tok);
+					return NULL;
+				}
+				char value[48];
+				snprintf(value, sizeof(value), "gl_ClipPlane[%s]", plane);
+				free(plane); free(tok);
+				return resolvedParam(value);
+			} else if (!strcmp(tok, "point")) {
+				if (!vertex) {
+					free(tok);
+					return NULL;
+				}
+				free(tok);
+				tok = popFIFO((sArray*)newVar);
+				if (!tok)
+					return NULL;
+				if (!strcmp(tok, "size")) {
+					free(tok);
+					return resolvedParam("vec4(gl_Point.size, gl_Point.sizeMin, gl_Point.sizeMax, gl_Point.fadeThresholdSize)");
+				}
+				if (!strcmp(tok, "attenuation")) {
+					free(tok);
+					return resolvedParam("vec4(gl_Point.distanceConstantAttenuation, gl_Point.distanceLinearAttenuation, gl_Point.distanceQuadraticAttenuation, 1.)");
+				}
+				free(tok);
+				return NULL;
+			} else if (!strcmp(tok, "texenv")) {
+				if (vertex) {
+					free(tok);
+					return NULL;
+				}
+				free(tok);
+				char *unit = NULL;
+				if (newVar->strLen && newVar->strParts[0][0] == '[') {
+					unit = popBracketedIndex(newVar, MAX_TEX);
+					if (!unit)
+						return NULL;
+				} else {
+					unit = strdup("0");
+				}
+				tok = popFIFO((sArray*)newVar);
+				if (!tok || strcmp(tok, "color")) {
+					free(unit); free(tok);
+					return NULL;
+				}
+				char value[48];
+				snprintf(value, sizeof(value), "gl_TextureEnvColor[%s]", unit);
+				free(unit); free(tok);
+				return resolvedParam(value);
+			} else if (!strcmp(tok, "depth")) {
+				if (vertex) {
+					free(tok);
+					return NULL;
+				}
+				free(tok);
+				tok = popFIFO((sArray*)newVar);
+				if (!tok || strcmp(tok, "range")) {
+					free(tok);
+					return NULL;
+				}
+				free(tok);
+				return resolvedParam("vec4(gl_DepthRange.near, gl_DepthRange.far, gl_DepthRange.diff, 1.)");
+			} else if (!strcmp(tok, "matrix")) {
 			isMatrix = 1;
 			
 			free(tok);
@@ -966,7 +1119,6 @@ char **resolveParam(sCurStatus_NewVar *newVar, int vertex, int type) {
 				free(tok);
 				if (newVar->strLen && !IS_NEW_STR_OR_SWIZZLE(newVar->strParts[0], type)) {
 					int mvmtx = 0;
-					int mvmtxsz = 0;
 					if (newVar->strParts[0][0] == '[') {
 						free(popFIFO((sArray*)newVar));
 						tok = popFIFO((sArray*)newVar);
@@ -976,7 +1128,6 @@ char **resolveParam(sCurStatus_NewVar *newVar, int vertex, int type) {
 								free(tok);
 								return NULL;
 							}
-							++mvmtxsz;
 							mvmtx = mvmtx * 10 + *numPtr - '0';
 						}
 						free(tok);
@@ -2295,13 +2446,19 @@ char **resolveParam(sCurStatus_NewVar *newVar, int vertex, int type) {
 
 #define FAIL(str) curStatusPtr->status = ST_ERROR; if (*error_msg) free(*error_msg); \
 		*error_msg = strdup(str); return
+static char *createGeneratedVariableName(sCurStatus *curStatusPtr) {
+	char name[64];
+	snprintf(name, sizeof(name), "_gl4es_arb_var_%zu",
+		curStatusPtr->nextGeneratedName++);
+	return strdup(name);
+}
+
 void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct sSpecialCases *specialCases) {
 	if (((curStatusPtr->curToken == TOK_UNKNOWN) && (curStatusPtr->status != ST_LINE_COMMENT))
 		|| (curStatusPtr->curToken == TOK_NULL)) {
 		FAIL("Unknown token");
 	}
 	
-	// TODO: replace '$' in variable names with something else that is also valid in GLSL
 	switch (curStatusPtr->status) {
 	case ST_LINE_START:
 		switch (curStatusPtr->curToken) {
@@ -2329,6 +2486,7 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 					curStatusPtr->curValue.newInst.inst.vars[i].swizzle[1] = SWIZ_NONE;
 					curStatusPtr->curValue.newInst.inst.vars[i].swizzle[2] = SWIZ_NONE;
 					curStatusPtr->curValue.newInst.inst.vars[i].swizzle[3] = SWIZ_NONE;
+					curStatusPtr->curValue.newInst.inst.vars[i].swzSelector = SWZSEL_NONE;
 				}
 				curStatusPtr->curValue.newInst.inst.codeLocation = curStatusPtr->codePtr;
 			} else if ((vtype = STR2VARTYPE(tok)) != VARTYPE_UNK) {
@@ -2401,19 +2559,8 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 					FAIL("Cannot redefine variable");
 				}
 				
-				if (!strcmp(tok, "half")) {
-					// Special case for the 'half' keyword
-					pushArray((sArray*)curStatusPtr->curValue.newVar.var, strdup("gl4es_half"));
-					
-					// Hopefully this doesn't make a free-after-free in case of error (though it shouldn't)
-					int ret;
-					khint_t varIdx = kh_put(variables, curStatusPtr->varsMap, tok, &ret);
-					if (ret < 0) {
-						FAIL("Unknown error");
-					}
-					kh_val(curStatusPtr->varsMap, varIdx) = curStatusPtr->curValue.newVar.var;
-				}
-				
+				pushArray((sArray*)curStatusPtr->curValue.newVar.var,
+					createGeneratedVariableName(curStatusPtr));
 				pushArray((sArray*)curStatusPtr->curValue.newVar.var, tok);
 				curStatusPtr->curValue.newVar.state = 1;
 				}
@@ -2428,7 +2575,7 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 				khint_t varIdx = kh_put(
 					variables,
 					curStatusPtr->varsMap,
-					curStatusPtr->curValue.newVar.var->names[0],
+					curStatusPtr->curValue.newVar.var->names[1],
 					&ret
 				);
 				if (ret < 0) {
@@ -2450,7 +2597,7 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 				khint_t varIdx = kh_put(
 					variables,
 					curStatusPtr->varsMap,
-					curStatusPtr->curValue.newVar.var->names[0],
+					curStatusPtr->curValue.newVar.var->names[1],
 					&ret
 				);
 				if (ret < 0) {
@@ -2489,19 +2636,8 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 					FAIL("Cannot redefine variable");
 				}
 				
-				if (!strcmp(tok, "half")) {
-					// Special case for the 'half' keyword
-					pushArray((sArray*)curStatusPtr->curValue.newVar.var, strdup("gl4es_half"));
-					
-					// Hopefully this doesn't make a free-after-free in case of error (though it shouldn't)
-					int ret;
-					khint_t varIdx = kh_put(variables, curStatusPtr->varsMap, tok, &ret);
-					if (ret < 0) {
-						FAIL("Unknown error");
-					}
-					kh_val(curStatusPtr->varsMap, varIdx) = curStatusPtr->curValue.newVar.var;
-				}
-				
+				pushArray((sArray*)curStatusPtr->curValue.newVar.var,
+					createGeneratedVariableName(curStatusPtr));
 				pushArray((sArray*)curStatusPtr->curValue.newVar.var, tok);
 				curStatusPtr->curValue.newVar.state = 1;
 				}
@@ -2654,7 +2790,7 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 				khint_t varIdx = kh_put(
 					variables,
 					curStatusPtr->varsMap,
-					curStatusPtr->curValue.newVar.var->names[0],
+					curStatusPtr->curValue.newVar.var->names[1],
 					&ret
 				);
 				if (ret < 0) {
@@ -2717,7 +2853,7 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 				khint_t varIdx = kh_put(
 					variables,
 					curStatusPtr->varsMap,
-					curStatusPtr->curValue.newVar.var->names[0],
+					curStatusPtr->curValue.newVar.var->names[1],
 					&ret
 				);
 				if (ret < 0) {
@@ -2890,7 +3026,7 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 				khint_t varIdx = kh_put(
 					variables,
 					curStatusPtr->varsMap,
-					curStatusPtr->curValue.newVar.var->names[0],
+					curStatusPtr->curValue.newVar.var->names[1],
 					&ret
 				);
 				if (ret < 0) {
@@ -3083,7 +3219,7 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 				khint_t varIdx = kh_put(
 					variables,
 					curStatusPtr->varsMap,
-					curStatusPtr->curValue.newVar.var->names[0],
+					curStatusPtr->curValue.newVar.var->names[1],
 					&ret
 				);
 				if (ret < 0) {
@@ -3281,6 +3417,17 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 			break;
 			
 		case TOK_INTEGER:
+			if ((curStatusPtr->curValue.newInst.inst.type == INST_SWZ) &&
+			    (curStatusPtr->curValue.newInst.curArg >= 2) &&
+			    ((curStatusPtr->curValue.newInst.state == STATE_START) ||
+			     (curStatusPtr->curValue.newInst.state == STATE_AFTER_SIGN))) {
+				if (curStatusPtr->tokInt > 1) {
+					FAIL("SWZ selector must be x, y, z, w, 0, or 1");
+				}
+				curVarPtr->swzSelector = curStatusPtr->tokInt ? SWZSEL_ONE : SWZSEL_ZERO;
+				curStatusPtr->curValue.newInst.state = STATE_AFTER_SWIZZLE;
+				break;
+			}
 			switch (curStatusPtr->curValue.newInst.state) {
 			case STATE_START:
 				if (texSampler) {
@@ -3358,6 +3505,28 @@ void parseToken(sCurStatus* curStatusPtr, int vertex, char **error_msg, struct s
 			
 		case TOK_IDENTIFIER: {
 			char *tok = getToken(curStatusPtr);
+
+			if ((curStatusPtr->curValue.newInst.inst.type == INST_SWZ) &&
+			    (curStatusPtr->curValue.newInst.curArg >= 2) &&
+			    ((curStatusPtr->curValue.newInst.state == STATE_START) ||
+			     (curStatusPtr->curValue.newInst.state == STATE_AFTER_SIGN))) {
+				if (tok[1] != '\0') {
+					free(tok);
+					FAIL("Invalid SWZ selector");
+				}
+				switch (tok[0]) {
+				case 'x': case 'r': curVarPtr->swzSelector = SWZSEL_X; break;
+				case 'y': case 'g': curVarPtr->swzSelector = SWZSEL_Y; break;
+				case 'z': case 'b': curVarPtr->swzSelector = SWZSEL_Z; break;
+				case 'w': case 'a': curVarPtr->swzSelector = SWZSEL_W; break;
+				default:
+					free(tok);
+					FAIL("Invalid SWZ selector");
+				}
+				curStatusPtr->curValue.newInst.state = STATE_AFTER_SWIZZLE;
+				free(tok);
+				break;
+			}
 			
 			switch (curStatusPtr->curValue.newInst.state) {
 			case STATE_START:

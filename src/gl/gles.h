@@ -29,6 +29,13 @@ typedef double           GLdouble;
 
 typedef unsigned int     GLhandleARB;
 typedef char             GLcharARB;
+
+/* GLES2 has no core 3D sampler token, but a WebGL2/GLES3 backend can report
+ * it through glGetActiveUniform.  Keep the desktop/GLES3 numeric value
+ * available to the common program and uniform bookkeeping code. */
+#ifndef GL_SAMPLER_3D
+#define GL_SAMPLER_3D                    0x8B5F
+#endif
 /*************************************************************/
 
 /* OpenGL ES core versions */

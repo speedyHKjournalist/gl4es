@@ -580,7 +580,13 @@ char* ConvertShader(const char* pEntry, int isVertex, shaderconv_need_t *need)
   if(hardext.maxdrawbuffers>1 && strstr(pBuffer, "gl_FragData[")) {
     Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, 1), useEXTDrawBuffers, Tmp, &tmpsize);
   }
-  // if some functions are used, add some int/float alternative
+  // If some functions are used, add int/float alternatives for permissive
+  // legacy GLES drivers. WebGL follows the GLSL ES rule that built-in
+  // function names cannot be redeclared, even with a different overload;
+  // injecting these helpers makes otherwise valid shaders fail to compile.
+  // Emscripten targets WebGL exclusively, so keep the compatibility hack on
+  // native GLES while never emitting it into a WebGL shader.
+  #ifndef __EMSCRIPTEN__
   if(!fpeShader && !globals4es.nointovlhack) {
     if(strstr(Tmp, "pow(") || strstr(Tmp, "pow (")) {
         Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, headline), HackAltPow, Tmp, &tmpsize);
@@ -598,6 +604,7 @@ char* ConvertShader(const char* pEntry, int isVertex, shaderconv_need_t *need)
         Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, headline), HackAltMod, Tmp, &tmpsize);
     }
   }
+  #endif
   if(!isVertex && hardext.shaderlod && 
     (gl4es_find_string(Tmp, "texture2DLod") || gl4es_find_string(Tmp, "texture2DProjLod") 
   || gl4es_find_string(Tmp, "textureCubeLod") 

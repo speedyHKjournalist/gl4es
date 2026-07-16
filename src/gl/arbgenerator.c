@@ -917,9 +917,54 @@ void generateInstruction(sCurStatus *curStatusPtr, int vertex, char **error_msg,
 		FINISH_INST(0)
 		
 	case INST_SWZ:
-		// TODO
-		FAIL("ARBconv TODO: SWZ");
-		break;
+		ASSERT_MASKDST(0)
+		ASSERT_VECTSRC(1)
+		if ((SWIZ(1, 0) != SWIZ_NONE) ||
+		    instPtr->vars[1].floatArrAddr != NULL) {
+			FAIL("SWZ source must be an un-swizzled vector register");
+		}
+		for (int selector = 2; selector < 6; selector++) {
+			if (instPtr->vars[selector].swzSelector == SWZSEL_NONE) {
+				FAIL("SWZ requires four component selectors");
+			}
+		}
+		APPEND_OUTPUT("\t", 1)
+		PUSH_MASKDST(0)
+		APPEND_OUTPUT(" = ", 3)
+		PUSH_PRE_SAT(0)
+		APPEND_OUTPUT("vec4(", 5)
+		for (int selector = 2; selector < 6; selector++) {
+			if (instPtr->vars[selector].sign == -1) {
+				APPEND_OUTPUT("-(", 2)
+			}
+			switch (instPtr->vars[selector].swzSelector) {
+			case SWZSEL_X:
+			case SWZSEL_Y:
+			case SWZSEL_Z:
+			case SWZSEL_W:
+				PUSH_VARNAME(1)
+				APPEND_OUTPUT(".", 1)
+				PUSH_SWIZZLE((int)instPtr->vars[selector].swzSelector)
+				break;
+			case SWZSEL_ZERO:
+				APPEND_OUTPUT("0.0", 3)
+				break;
+			case SWZSEL_ONE:
+				APPEND_OUTPUT("1.0", 3)
+				break;
+			default:
+				FAIL("Invalid SWZ selector");
+			}
+			if (instPtr->vars[selector].sign == -1) {
+				APPEND_OUTPUT(")", 1)
+			}
+			if (selector != 5) {
+				APPEND_OUTPUT(", ", 2)
+			}
+		}
+		APPEND_OUTPUT(")", 1)
+		PUSH_POSTSAT(0)
+		FINISH_INST(1)
 		
 	case INST_TEX:
 		if (vertex) {

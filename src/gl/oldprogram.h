@@ -6,6 +6,7 @@
 #include "shader.h"
 #include "uniform.h"
 #include "program.h"
+#include "arbconverter.h"
 
 typedef struct kh_oldprograms_s kh_oldprograms_t;
 typedef struct glstate_s glstate_t;
@@ -15,7 +16,10 @@ typedef struct oldprogram_s {
     GLuint      id;
     GLenum      type;
     char*       string;
+    GLsizei     string_length;
     shader_t*   shader;
+    arb_program_stats_t stats;
+    GLboolean   under_native_limits;
     int         max_local_params;
     float*      prog_local_params;
     int         max_env_params;

@@ -1,5 +1,17 @@
 #include "framebuffers.h"
 
+#ifndef GL_RGB10
+#define GL_RGB10 0x8052
+#define GL_RGB12 0x8053
+#define GL_RGBA2 0x8055
+#define GL_RGBA12 0x805A
+#endif
+#ifndef GL_SRGB
+#define GL_SRGB 0x8C40
+#define GL_SRGB8 0x8C41
+#define GL_SRGB8_ALPHA8 0x8C43
+#endif
+
 #include "../glx/hardext.h"
 #include "blit.h"
 #include "debug.h"
@@ -997,18 +1009,35 @@ void APIENTRY_GL4ES gl4es_glRenderbufferStorage(GLenum target, GLenum internalfo
     }
     else if (internalformat == GL_DEPTH_COMPONENT || internalformat == GL_DEPTH_COMPONENT32)    // Not much is supported on GLES...
         internalformat = GL_DEPTH_COMPONENT16;
+    else if (internalformat == GL_STENCIL_INDEX1 || internalformat == GL_STENCIL_INDEX4 ||
+             internalformat == GL_STENCIL_INDEX16)
+        internalformat = GL_STENCIL_INDEX8;
     else if (internalformat == GL_RGB8 && hardext.rgba8==0)
         internalformat = GL_RGB565_OES;
     else if (internalformat == GL_RGBA8 && hardext.rgba8==0)
         internalformat = GL_RGBA4_OES;
-    else if (internalformat == GL_RGB5)
+    else if (internalformat == GL_RGB || internalformat == GL_RGB5)
         internalformat = GL_RGB565_OES;
     else if (internalformat == GL_R3_G3_B2)
         internalformat = GL_RGB565_OES;
     else if (internalformat == GL_RGB4)
         internalformat = GL_RGBA4_OES;
+    else if (internalformat == GL_RGB10)
+        internalformat = GL_RGB10_A2;
+    else if (internalformat == GL_RGB12 || internalformat == GL_RGB16)
+        internalformat = hardext.rgba8 ? GL_RGBA8 : GL_RGBA4_OES;
+    else if (internalformat == GL_RGBA2 || internalformat == GL_RGBA4)
+        internalformat = GL_RGBA4_OES;
+    else if (internalformat == GL_RGBA12 || internalformat == GL_RGBA16)
+        internalformat = hardext.rgba8 ? GL_RGBA8 : GL_RGBA4_OES;
+    else if (internalformat == GL_SRGB || internalformat == GL_SRGB8)
+        internalformat = GL_SRGB8_ALPHA8;
+    else if (internalformat == GL_RGB16F)
+        internalformat = GL_RGBA16F;
+    else if (internalformat == GL_RGB32F)
+        internalformat = GL_RGBA32F;
     else if (internalformat == GL_RGBA) {
-        if(hardext.rgba8==0)
+        if(hardext.rgba8)
             internalformat = GL_RGBA8;
         else
             internalformat = GL_RGBA4_OES;
