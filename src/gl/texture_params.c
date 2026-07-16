@@ -929,7 +929,12 @@ void realize_textures(int drawing) {
                 tex->mipmap_need = 0;
             else
                 tex->mipmap_need = (is_mipmap_needed(&tex->sampler) && (hardext.esversion!=1) && !tex->npot)?1:0;
-            if(tex->mipmap_need && !tex->mipmap_done) {
+            /* An undefined desktop texture is incomplete and samples from the
+             * implementation's black fallback.  Calling GenerateMipmap before
+             * level zero exists is invalid in WebGL and produces a warning for
+             * every otherwise-unused texture unit.  Defer generation until an
+             * image has actually been supplied. */
+            if(tex->valid && tex->mipmap_need && !tex->mipmap_done) {
                 if(!tex->mipmap_auto) {
                     // should check if glGenerateMipmap exist, and fall back to no mipmap if not
                     LOAD_GLES2_OR_OES(glGenerateMipmap);
