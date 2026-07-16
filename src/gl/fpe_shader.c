@@ -36,6 +36,15 @@ const char texcoordxy[] = {'x', 'y', 'z', 'w'};
 
 const char* gl4es_alphaRefSource = "uniform float _gl4es_AlphaRef;\n";
 
+static int fpe_effective_textype(const shaderconv_need_t* need, const fpe_state_t* state, int tmu) {
+    int t = state->texture[tmu].textype;
+    if(need && (need->need_texs & (1 << tmu)) && t == 0)
+        t = FPE_TEX_2D;
+    if(need && !(need->need_texs & (1 << tmu)))
+        t = 0;
+    return t;
+}
+
 const char* fpe_texenvSrc(int src, int tmu, int twosided) {
     static char buff[200];
     switch(src) {
@@ -848,7 +857,7 @@ const char* const* fpe_FragmentShader(shaderconv_need_t* need, fpe_state_t *stat
     {
         int need_stream = 0;
         for (int i=0; i<hardext.maxtex; i++) {
-            const int t = state->texture[i].textype;
+            const int t = fpe_effective_textype(need, state, i);
             if(t==FPE_TEX_STRM)
                 need_stream = 1;
             if(t)
@@ -907,11 +916,8 @@ const char* const* fpe_FragmentShader(shaderconv_need_t* need, fpe_state_t *stat
     }
     // textures coordinates
     for (int i=0; i<hardext.maxtex; i++) {
-        int t = state->texture[i].textype;
+        int t = fpe_effective_textype(need, state, i);
         if(point && !pointsprite) t=0;
-        if(!is_default)
-            if(t && !need->need_texs&(1<<i))
-                t = 0;
         if(t) {
             sprintf(buff, "varying highp %s _gl4es_TexCoord_%d;\n", texvecsize[t-1], i);
             ShadAppend(buff);
@@ -966,7 +972,7 @@ const char* const* fpe_FragmentShader(shaderconv_need_t* need, fpe_state_t *stat
     if(texturing && (!point || pointsprite) ) {
         // fetch textures first
         for (int i=0; i<hardext.maxtex; i++) {
-            int t = state->texture[i].textype;
+            int t = fpe_effective_textype(need, state, i);
             if(t) {
                 if(point && pointsprite && pointsprite_coord) {
                     if(pointsprite_upper)
@@ -988,7 +994,7 @@ const char* const* fpe_FragmentShader(shaderconv_need_t* need, fpe_state_t *stat
         }
         // fetch textures first
         for (int i=0; i<hardext.maxtex; i++) {
-            int t = state->texture[i].textype;
+            int t = fpe_effective_textype(need, state, i);
 
             if(t) {
                 int texenv = state->texenv[i].texenv;
@@ -1639,10 +1645,10 @@ const char* const* fpe_CustomVertexShader(const char* initial, fpe_state_t* stat
     if(headline) --headline;
 
     strcpy(shad, "");
-    ShadAppend(initial);
+    if(initial)
+        ShadAppend(initial);
 
-    int color = default_fragment?(strstr(initial, "_gl4es_Color")?0:1):0;   // need to add a simple color variant?
-if(default_fragment) printf("fpe_CustomVertexShader(%p, %p, %d)\n%s\ncolor=%d\n", initial, state, default_fragment, initial, color);
+    int color = default_fragment?((initial && strstr(initial, "_gl4es_Color"))?0:1):0;   // need to add a simple color variant?
     // add some uniform and varying
     if(planes) {
         for (int i=0; i<hardext.maxplanes; i++) {

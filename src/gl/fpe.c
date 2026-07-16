@@ -304,9 +304,11 @@ void APIENTRY_GL4ES fpe_oldprogram(fpe_state_t* state) {
     // There is an old program (either vtx or frg or both)
     oldprogram_t* old_vtx = getOldProgram(state->vertex_prg_id);
     oldprogram_t* old_frg = getOldProgram(state->fragment_prg_id);
+    int use_vtx_program = state->vertex_prg_id && old_vtx && old_vtx->shader && old_vtx->shader->source;
+    int use_frg_program = state->fragment_prg_id && old_frg && old_frg->shader && old_frg->shader->source;
 
     glstate->fpe->vert = gl4es_glCreateShader(GL_VERTEX_SHADER);
-    if(state->vertex_prg_id) {
+    if(use_vtx_program) {
         gl4es_glShaderSource(glstate->fpe->vert, 1, fpe_CustomVertexShader(old_vtx->shader->source, state, state->fragment_prg_id?0:1), NULL);
         gl4es_glCompileShader(glstate->fpe->vert);
         gl4es_glGetShaderiv(glstate->fpe->vert, GL_COMPILE_STATUS, &status);
@@ -320,8 +322,9 @@ void APIENTRY_GL4ES fpe_oldprogram(fpe_state_t* state) {
         }
         getShader(glstate->fpe->vert)->old = old_vtx;
     } else {
-        // use fragment need to build default vertex shader
-        gl4es_glShaderSource(glstate->fpe->vert, 1, fpe_VertexShader(&old_frg->shader->need, state), NULL);
+        // Use fragment need to build default vertex shader when possible.
+        shaderconv_need_t* need = use_frg_program?&old_frg->shader->need:NULL;
+        gl4es_glShaderSource(glstate->fpe->vert, 1, fpe_VertexShader(need, state), NULL);
         gl4es_glCompileShader(glstate->fpe->vert);
         gl4es_glGetShaderiv(glstate->fpe->vert, GL_COMPILE_STATUS, &status);
         if(status!=GL_TRUE) {
@@ -332,7 +335,7 @@ void APIENTRY_GL4ES fpe_oldprogram(fpe_state_t* state) {
     }
     gl4es_glAttachShader(glstate->fpe->prog, glstate->fpe->vert);
     glstate->fpe->frag = gl4es_glCreateShader(GL_FRAGMENT_SHADER);
-    if(state->fragment_prg_id) {
+    if(use_frg_program) {
         gl4es_glShaderSource(glstate->fpe->frag, 1, fpe_CustomFragmentShader(old_frg->shader->source, state), NULL);
         gl4es_glCompileShader(glstate->fpe->frag);
         gl4es_glGetShaderiv(glstate->fpe->frag, GL_COMPILE_STATUS, &status);
@@ -347,7 +350,8 @@ void APIENTRY_GL4ES fpe_oldprogram(fpe_state_t* state) {
         getShader(glstate->fpe->frag)->old = old_frg;
     } else {
         // use vertex need to build default fragment shader
-        gl4es_glShaderSource(glstate->fpe->frag, 1, fpe_FragmentShader(&old_vtx->shader->need, state), NULL);
+        shaderconv_need_t* need = use_vtx_program?&old_vtx->shader->need:NULL;
+        gl4es_glShaderSource(glstate->fpe->frag, 1, fpe_FragmentShader(need, state), NULL);
         gl4es_glCompileShader(glstate->fpe->frag);
         gl4es_glGetShaderiv(glstate->fpe->frag, GL_COMPILE_STATUS, &status);
         if(status!=GL_TRUE) {
@@ -366,8 +370,8 @@ void APIENTRY_GL4ES fpe_oldprogram(fpe_state_t* state) {
         if(globals4es.logshader)
             printf("LIBGL: FPE ARB Program link failed: %s\n with vertex %s%s%s%s%s and fragment %s%s%s%s%s\n", 
                 buff, 
-                state->vertex_prg_id?"custom:\n":"default", state->vertex_prg_id?old_vtx->string:"", state->vertex_prg_id?"\nconverted:\n":"", state->vertex_prg_id?old_vtx->shader->source:"", state->vertex_prg_id?"\n":"", 
-                state->fragment_prg_id?"custom:\n":"default", state->fragment_prg_id?old_frg->string:"", state->fragment_prg_id?"\nconverted:\n":"", state->fragment_prg_id?old_frg->shader->source:"", state->fragment_prg_id?"\n":"");
+                use_vtx_program?"custom:\n":"default", use_vtx_program?old_vtx->string:"", use_vtx_program?"\nconverted:\n":"", use_vtx_program?old_vtx->shader->source:"", use_vtx_program?"\n":"",
+                use_frg_program?"custom:\n":"default", use_frg_program?old_frg->string:"", use_frg_program?"\nconverted:\n":"", use_frg_program?old_frg->shader->source:"", use_frg_program?"\n":"");
         else
             printf("LIBGL: FPE ARB Program link failed: %s\n", buff);
     }
