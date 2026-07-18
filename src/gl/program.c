@@ -335,28 +335,35 @@ void APIENTRY_GL4ES gl4es_glGetActiveUniform(GLuint program, GLuint index, GLsiz
         DBG(printf(" not linked\n");)
         return;
     }
-    noerrorShim();
-    if(strncmp(name, "gl_", 3)==0) {
-        DBG(printf(" internal uniform\n");)
+    if(bufSize < 0) {
+        errorShim(GL_INVALID_VALUE);
         return;
     }
-
+    noerrorShim();
     // look in uniform cache, that is filled when program is linked
     if(glprogram->uniform) {
         uniform_t *m;
+        uniform_t *active = NULL;
         kh_foreach_value(glprogram->uniform, m,
-            if(m->internal_id == index) {
-                if(type) *type = m->type;
-                if(size) *size = m->size;
-                if(length) *length = strlen(m->name);
-                if(bufSize && name) {
-                    strncpy(name, m->name, bufSize-1);
-                    name[bufSize-1] = '\0';
-                }
-                DBG(printf(" found %s (%zd), type=%s, size=%d\n", m->name, strlen(m->name), PrintEnum(m->type), m->size);)
-                return;
-            }
+            /* One cache entry is kept for every array element and all of them
+             * share the GLES active-uniform index.  Reflection must report the
+             * base entry (the one with the full remaining size), otherwise
+             * khash iteration can expose an arbitrary animdata[n] name and a
+             * truncated array size. */
+            if(m->internal_id == index && (!active || m->size > active->size))
+                active = m;
         );
+        if(active) {
+            if(type) *type = active->type;
+            if(size) *size = active->size;
+            if(length) *length = strlen(active->name);
+            if(bufSize && name) {
+                strncpy(name, active->name, bufSize-1);
+                name[bufSize-1] = '\0';
+            }
+            DBG(printf(" found %s (%zd), type=%s, size=%d\n", active->name, strlen(active->name), PrintEnum(active->type), active->size);)
+            return;
+        }
     }
     // end
     DBG(printf(" not found\n");)
@@ -494,7 +501,7 @@ GLint APIENTRY_GL4ES gl4es_glGetUniformLocation(GLuint program, const GLchar *na
         kh_foreach_value(glprogram->uniform, m,
             if(strlen(m->name)==l && strncmp(m->name, name, l)==0) {
                 res = m->id;
-                if(index>m->size) {
+                if(index>=m->size) {
                     res = -1;   // too big !
                 } else
                     res += index;
